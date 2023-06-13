@@ -147,7 +147,10 @@ class VAE(nn.Module):
             #    Instead of sampling from N(psi(z), sigma2 I), we'll just take
             #    the mean, i.e. psi(z).
             # ====== YOUR CODE: ======
-            raise NotImplementedError()
+            for i in range(n):
+                z = torch.randn(1, self.z_dim, device=device)
+                x_rec = self.decode(z)
+                samples.append(x_rec.squeeze(0))
             # ========================
 
         # Detach and move to CPU for display purposes
@@ -183,18 +186,12 @@ def vae_loss(x, xr, z_mu, z_log_sigma2, x_sigma2):
     batch_size = x.size(0)
     input_size = x.size(1) * x.size(2) * x.size(3)
     latent_size = z_mu.size(1)
-
-    # Compute data loss term
-    data_loss_b =torch.linalg.norm(x.view(batch_size, -1) - xr.view(batch_size, -1), dim=1) ** 2 / (x_sigma2 * input_size)
-    data_loss = torch.mean(data_loss_b)
+    # Compute data reconstruction loss term
+    data_loss = torch.mean(torch.norm(x.view(batch_size, -1) - xr.view(batch_size, -1), dim=1) ** 2 / (x_sigma2 * input_size), dim=0)
 
     # Compute KL divergence loss term
-    kldiv_loss_b = torch.sum(torch.exp(0.5*z_log_sigma2), dim=1) + torch.linalg.norm(z_mu, dim=1) ** 2
-    - torch.log(torch.prod(torch.exp(0.5*z_log_sigma2), dim=1)) - latent_size
-    kldiv_loss = torch.mean(kldiv_loss_b)
-    print(data_loss.shape)
-
-
+    kldiv_loss = torch.mean(-1 * torch.sum(1 + z_log_sigma2 - z_mu ** 2 - z_log_sigma2.exp(), dim = 1), dim = 0)
+    
     # Compute VAE loss
     loss = data_loss + kldiv_loss
     # ========================

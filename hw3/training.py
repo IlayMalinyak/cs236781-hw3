@@ -94,21 +94,40 @@ class Trainer(abc.ABC):
             #    simple regularization technique that is highly recommended.
             # ====== YOUR CODE: ======
             
-            raise NotImplementedError()
+            train_result = self.train_epoch(dl_train, **kw)
+            t_loss, t_acc = train_result.losses, train_result.accuracy
+            # print(t_loss, t_acc)
+            train_loss.extend(t_loss)
+            train_acc.append(t_acc)
+            
+            
+            test_result = self.test_epoch(dl_test, **kw)
+            t_loss, t_acc = test_result.losses, test_result.accuracy
+            test_loss.extend(t_loss)
+            test_acc.append(t_acc)
+            actual_num_epochs += 1
+
+            if best_acc is None or test_result.accuracy > best_acc:
+                best_acc = test_result.accuracy
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+                if epochs_without_improvement == early_stopping:
+                    print('early stopping!', flush=True)
+                    break
 
             # ========================
 
-            # Save model checkpoint if requested
-            if save_checkpoint and checkpoint_filename is not None:
-                saved_state = dict(
-                    best_acc=best_acc,
-                    ewi=epochs_without_improvement,
-                    model_state=self.model.state_dict(),
-                )
-                torch.save(saved_state, checkpoint_filename)
-                print(
-                    f"*** Saved checkpoint {checkpoint_filename} " f"at epoch {epoch+1}"
-                )
+            # Save model checkpoint
+            saved_state = dict(
+                best_acc=best_acc,
+                ewi=epochs_without_improvement,
+                model_state=self.model.state_dict(),
+            )
+            torch.save(saved_state, checkpoint_filename)
+            print(
+                f"*** Saved checkpoint {checkpoint_filename} " f"at epoch {epoch+1}"
+            )
 
             if post_epoch_fn:
                 post_epoch_fn(epoch, train_result, test_result, verbose)
@@ -282,7 +301,13 @@ class VAETrainer(Trainer):
         x = x.to(self.device)  # Image batch (N,C,H,W)
         # TODO: Train a VAE on one batch.
         # ====== YOUR CODE: ======
-        raise NotImplementedError()
+        x_rc, z_mu, z_log_sigma2 = self.model(x)
+        self.optimizer.zero_grad()
+        loss, data_loss, kldiv_loss = self.loss_fn(x, x_rc, z_mu, z_log_sigma2)
+        loss.backward()
+        self.optimizer.step()
+        # x_sigma2 = torch.std(x.view(x.shape[0],-1), dim=-1)
+        
         # ========================
 
         return BatchResult(loss.item(), 1 / data_loss.item())
@@ -294,7 +319,8 @@ class VAETrainer(Trainer):
         with torch.no_grad():
             # TODO: Evaluate a VAE on one batch.
             # ====== YOUR CODE: ======
-            raise NotImplementedError()    
+            x_rc, z_mu, z_log_sigma2 = self.model(x)
+            loss, data_loss, kldiv_loss = self.loss_fn(x, x_rc, z_mu, z_log_sigma2)
             # ========================
 
         return BatchResult(loss.item(), 1 / data_loss.item())
