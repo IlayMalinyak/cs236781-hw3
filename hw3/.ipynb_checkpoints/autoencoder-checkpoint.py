@@ -46,22 +46,22 @@ class DecoderCNN(nn.Module):
         modules = []
 
         # Transposed convolutional layer 1
-        modules.append(nn.ConvTranspose2d(in_channels, 64, kernel_size=4, stride=2, padding=1))
+        modules.append(nn.ConvTranspose2d(in_channels, 256, kernel_size=4, stride=2, padding=1))
+        modules.append(nn.ReLU())
+        modules.append(nn.BatchNorm2d(256))
+
+        # Transposed convolutional layer 2
+        modules.append(nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1))
+        modules.append(nn.ReLU())
+        modules.append(nn.BatchNorm2d(128))
+
+        # Transposed convolutional layer 3
+        modules.append(nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1))
         modules.append(nn.ReLU())
         modules.append(nn.BatchNorm2d(64))
 
-        # Transposed convolutional layer 2
-        modules.append(nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1))
-        modules.append(nn.ReLU())
-        modules.append(nn.BatchNorm2d(32))
-
-        # Transposed convolutional layer 3
-        modules.append(nn.ConvTranspose2d(32, 16, kernel_size=4, stride=2, padding=1))
-        modules.append(nn.ReLU())
-        modules.append(nn.BatchNorm2d(16))
-
         # Transposed convolutional layer 4
-        modules.append(nn.ConvTranspose2d(16, out_channels, kernel_size=4, stride=2, padding=1))
+        modules.append(nn.ConvTranspose2d(64, out_channels, kernel_size=4, stride=2, padding=1))
         modules.append(nn.Tanh())
 
         self.cnn = nn.Sequential(*modules)

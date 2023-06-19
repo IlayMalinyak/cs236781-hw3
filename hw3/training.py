@@ -43,6 +43,7 @@ class Trainer(abc.ABC):
         early_stopping: int = None,
         print_every=1,
         post_epoch_fn=None,
+        trial=None,
         **kw,
     ) -> FitResult:
         """
@@ -114,20 +115,24 @@ class Trainer(abc.ABC):
                 epochs_without_improvement += 1
                 if epochs_without_improvement == early_stopping:
                     print('early stopping!', flush=True)
+                    epochs_wothout_improvement = 0
                     break
 
             # ========================
+            if checkpoints is not None:
+                # Save model checkpoint
+                saved_state = dict(
+                    best_acc=best_acc,
+                    ewi=epochs_without_improvement,
+                    model_state=self.model.state_dict(),
+                )
+                torch.save(saved_state, checkpoint_filename)
+                print(
+                    f"*** Saved checkpoint {checkpoint_filename} " f"at epoch {epoch+1}"
+                )
 
-            # Save model checkpoint
-            saved_state = dict(
-                best_acc=best_acc,
-                ewi=epochs_without_improvement,
-                model_state=self.model.state_dict(),
-            )
-            torch.save(saved_state, checkpoint_filename)
-            print(
-                f"*** Saved checkpoint {checkpoint_filename} " f"at epoch {epoch+1}"
-            )
+            if trial is not None and trial.should_prune():
+                raise optuna.exceptions.TrialPruned()
 
             if post_epoch_fn:
                 post_epoch_fn(epoch, train_result, test_result, verbose)
@@ -310,7 +315,7 @@ class VAETrainer(Trainer):
         
         # ========================
 
-        return BatchResult(loss.item(), 1 / data_loss.item())
+        return BatchResult(loss.item(), 1 / (data_loss.item()+1e-8))
 
     def test_batch(self, batch) -> BatchResult:
         x, _ = batch
@@ -323,7 +328,7 @@ class VAETrainer(Trainer):
             loss, data_loss, kldiv_loss = self.loss_fn(x, x_rc, z_mu, z_log_sigma2)
             # ========================
 
-        return BatchResult(loss.item(), 1 / data_loss.item())
+        return BatchResult(loss.item(), 1 / (data_loss.item()+1e-8))
 
 
 class TransformerEncoderTrainer(Trainer):
