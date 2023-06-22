@@ -5,193 +5,68 @@ from torch import Tensor
 import torch.nn.functional as F
 import copy
 from .longformer import LongformerSelfAttention, LongformerConfig
-from typing import Union
-from functools import lru_cache
-
-def _mask2(x, padding_mask, mask_value) -> Tensor:
-    """
-    Masks the input tensor according to 'padding_mask'.
-    :param x - Tensor of shape (batch_size, head_size, seq_size, seq_size)
-    param padding_mask - A padding mask of shape (batch_size, seq_size)
-    :return - A masked tensor of shape (batch_size, head_size, seq_size, seq_size)
-    """
-    if padding_mask is None:
-        return x
-    batch_size, head_size, seq_size,_ = x.shape
-    mask = padding_mask.unsqueeze(-1) @ padding_mask.unsqueeze(-2)
-    mask = mask.view(batch_size, 1, seq_size, seq_size).expand_as(x)
-    return x.masked_fill(mask == 0, mask_value)
-
-# def _skew2(x, padding_value):
-#     '''shift every row 1 step to right converting columns into diagonals'''
-#     # X = B x C x M x L
-#     B, C, M, L = x.size()
-#     x = nn.functional.pad(x, (0, M + 1), value=padding_value)  # B x C x M x (L+M+1)
-#     x = x.view(B, C, -1)  # B x C x ML+MM+M
-#     x = x[:, :, :-M]  # B x C x ML+MM
-#     x = x.view(B, C, M, M + L)  # B x C, M x L+M
-#     x = x[:, :, :, :-1]
-#     return x
 
 
-def _get_invalid_locations_mask_fixed_dilation(seq_len: int, w: int, d: int):
+# def _pad_mask(x, padding_mask, padding_value):
+#     batch_size, num_heads, seq_len, seq_len = x.shape
+#     mask = padding_mask.unsqueeze(-1) @ padding_mask.unsqueeze(-2)
+#     mask = mask.view(batch_size, 1, seq_len, seq_len).expand_as(x).to(x.device)
+#     return x.masked_fill(mask == 0, padding_value)
+
+# def sliding_chunks_matmul_pv(prob: torch.Tensor, v: torch.Tensor, w: int):
+#     '''Same as sliding_chunks_matmul_qk but for prob and value tensors. It is expecting the same output
+#     format from sliding_chunks_matmul_qk'''
+#     bsz, seqlen, num_heads, head_dim = v.size()
+#     # print("in pv: bsz,seq_len,heads,dim - ",  bsz, seqlen, num_heads, head_dim)
+#     assert seqlen % (w * 2) == 0
+#     assert prob.size()[:3] == v.size()[:3]
+#     assert prob.size(3) == 2 * w + 1
+#     chunks_count = seqlen // w - 1
+#     # group bsz and num_heads dimensions into one, then chunk seqlen into chunks of size 2w
+#     chunk_prob = prob.transpose(1, 2).reshape(bsz * num_heads, seqlen // w, w, 2 * w + 1)
+
+#     # group bsz and num_heads dimensions into one
+#     v = v.transpose(1, 2).reshape(bsz * num_heads, seqlen, head_dim)
+
+#     # pad seqlen with w at the beginning of the sequence and another w at the end
+#     padded_v = F.pad(v, (0, 0, w, w), value=-1)
+
+#     # chunk padded_v into chunks of size 3w and an overlap of size w
+#     chunk_v_size = (bsz * num_heads, chunks_count + 1, 3 * w, head_dim)
+#     chunk_v_stride = padded_v.stride()
+#     chunk_v_stride = chunk_v_stride[0], w * chunk_v_stride[1], chunk_v_stride[1], chunk_v_stride[2]
+#     chunk_v = padded_v.as_strided(size=chunk_v_size, stride=chunk_v_stride)
+
+#     skewed_prob = _skew2(chunk_prob, padding_value=0)
+
+#     context = torch.einsum('bcwd,bcdh->bcwh', (skewed_prob, chunk_v))
+#     return context.view(bsz, num_heads, seqlen, head_dim).transpose(1, 2)
+    
+
+def _get_invalid_locations_mask(w, device):
+    ''' Get values outside the window'''
     diagonals_list = []
-    for j in range(-d * w, d, d):
-        diagonal_mask = torch.zeros(seq_len, device='cpu', dtype=torch.uint8)
+    for j in range(-w, 1):
+        diagonal_mask = torch.zeros(w, device='cpu', dtype=torch.uint8)
         diagonal_mask[:-j] = 1
         diagonals_list.append(diagonal_mask)
-    return torch.stack(diagonals_list, dim=-1)
-    
-@lru_cache()
-def _get_invalid_locations_mask(w: int, d: Union[torch.Tensor,int], autoregressive: bool, device: str):
-    if isinstance(d, int):
-        affected_seq_len = w * d
-        mask = _get_invalid_locations_mask_fixed_dilation(affected_seq_len, w, d)
-        mask = mask[None, :, None, :]
-    else:
-        affected_seq_len = w * d.max()
-        head_masks = []
-        d_list = d.cpu().numpy().tolist()
-        for d in d_list:
-            one_head_mask = _get_invalid_locations_mask_fixed_dilation(affected_seq_len, w, d)
-            head_masks.append(one_head_mask)
-        mask = torch.stack(head_masks, dim=-2)
-        mask = mask[None, :, :, :]
+    mask = torch.stack(diagonals_list, dim=-1)
+    mask = mask[None, :, None, :]
+    ending_mask = mask.flip(dims=(1, 3)).bool().to(device)
+    return mask.bool().to(device), ending_mask
 
-    ending_mask = None if autoregressive else mask.flip(dims=(1, 3)).bool().to(device)
-    return affected_seq_len, mask.bool().to(device), ending_mask
-
-def mask_invalid_locations(input_tensor: torch.Tensor, w: int, d: Union[torch.Tensor, int], autoregressive: bool) -> torch.Tensor:
-    affected_seq_len, beginning_mask, ending_mask = _get_invalid_locations_mask(w, d, autoregressive, input_tensor.device)
+def mask_invalid_locations(input_tensor: torch.Tensor, w: int):
+    ''' Mask values outside the window'''
+    beginning_mask, ending_mask = _get_invalid_locations_mask(w, input_tensor.device)
     seq_len = input_tensor.size(1)
-    beginning_input = input_tensor[:, :affected_seq_len, :, :w+1]
+    beginning_input = input_tensor[:, :w, :, :w+1]
     beginning_mask = beginning_mask[:, :seq_len].expand(beginning_input.size())
     beginning_input.masked_fill_(beginning_mask, -9e15)
-    if not autoregressive:
-        ending_input = input_tensor[:, -affected_seq_len:, :, -(w+1):]
-        ending_mask = ending_mask[:, -seq_len:].expand(ending_input.size())
-        ending_input.masked_fill_(ending_mask, -9e15)
+    ending_input = input_tensor[:, -w:, :, -(w+1):]
+    ending_mask = ending_mask[:, -seq_len:].expand(ending_input.size())
+    ending_input.masked_fill_(ending_mask, -9e15)
 
 
-def _chunk(x, w):
-    '''convert into overlapping chunkings. Chunk size = 2w, overlap size = w'''
-
-    # non-overlapping chunks of size = 2w
-    x = x.view(x.size(0), x.size(1) // (w * 2), w * 2, x.size(2))
-
-    # use `as_strided` to make the chunks overlap with an overlap size = w
-    chunk_size = list(x.size())
-    chunk_size[1] = chunk_size[1] * 2 - 1
-
-    chunk_stride = list(x.stride())
-    chunk_stride[1] = chunk_stride[1] // 2
-    return x.as_strided(size=chunk_size, stride=chunk_stride)
-
-
-def _unfold(x: Tensor, window_size: int, pad_value: float) -> Tensor:
-    """
-    Folds input tensor 'window_size' times on the 'seq_size' dimension.
-    Makes sure the number of folds is the same as seq_size, by padding accordingly.
-    :param x - Tensor of shape (batch_size, head_size, seq_size, hidden_size)
-    :return - an unfolded tensor on the seq_size dimension. Tensor of
-    shape (batch_size, head_size, seq_size, window_size, hidden_size)
-    """
-    x = F.pad(x, (0, 0, window_size // 2, window_size // 2), value=pad_value)
-    return x.unfold(2, window_size, 1).swapaxes(-1, -2)
-
-
-def _sk(x: Tensor, pad_value: float) -> Tensor:
-    """
-    Skews input tensor and creates a matching banded square matrix.
-    :param x - Tensor of shape (batch_size, head_size, seq_size, window_size)
-    :return - an skewed tensor on the seq_size rows. Tensor of
-    shape (batch_size, head_size, seq_size, seq_size)
-    """
-    batch_size, head_size, seq_size, window_size = x.size()
-    mask = torch.ones(seq_size, seq_size, device=x.device, dtype=torch.bool)
-    mask = mask.triu(-window_size // 2 + 1).tril(window_size // 2)
-    mask = mask.view(1, 1, seq_size, seq_size).expand(batch_size, head_size, seq_size, seq_size)
-    skewed = torch.full_like(mask, fill_value=pad_value, dtype=x.dtype, device=x.device)
-    print(f'mask {mask.sum()} x {x.isfinite().sum()}')
-    skewed[mask] = x[x.isfinite()]
-    return skewed
-
-
-def _mask(x, padding_mask, mask_value) -> Tensor:
-    """
-    Masks the input tensor according to 'padding_mask'.
-    :param x - Tensor of shape (batch_size, head_size, seq_size, seq_size)
-    param padding_mask - A padding mask of shape (batch_size, seq_size)
-    :return - A masked tensor of shape (batch_size, head_size, seq_size, seq_size)
-    """
-    if padding_mask is None:
-        return x
-    batch_size, num_heads, head_size, seq_size, _ = x.shape
-    mask = padding_mask.unsqueeze(-1) @ padding_mask.unsqueeze(-2)
-    mask = mask.view(batch_size, 1, seq_size, seq_size).expand_as(x)
-    return x.masked_fill(mask == 0, mask_value)
-
-
-def sliding_window_attention2(q: Tensor, k: Tensor, v: Tensor, window_size: int, padding_mask: Tensor = None) -> tuple:
-    """
-    Computes the simple sliding window attention from 'Longformer: The Long-Document Transformer'.
-    This implementation is meant for multihead attention on batched tensors. It should work for both single and multi-head attention.
-    :param q - the query vectors. #[Batch, SeqLen, Dims] or [Batch, num_heads, SeqLen, Dims]
-    :param k - the key vectors.  #[Batch, *, SeqLen, Dims] or [Batch, num_heads, SeqLen, Dims]
-    :param v - the value vectors.  #[Batch, *, SeqLen, Dims] or [Batch, num_heads, SeqLen, Dims]
-    :param window_size - size of sliding window. Must be an even number.
-    :param padding_mask - a mask that indicates padding with 0.  #[Batch, SeqLen]
-    :return values - the output values. #[Batch, SeqLen, Dims] or [Batch, num_heads, SeqLen, Dims]
-    :return attention - the attention weights. #[Batch, SeqLen, SeqLen] or [Batch, num_heads, SeqLen, SeqLen]
-    """
-    assert window_size % 2 == 0, "window size must be an even number"
-
-    print("k nans", torch.any(k.isnan()))
-
-    window_size += 1  # The actual window size
-
-    v_shape = v.size()
-
-    batch_size = q.shape[0]
-    seq_size = q.shape[-2]
-    hidden_size = q.shape[-1]
-
-    print(f"batch size {batch_size}, seq_size {seq_size}, hidden_size {hidden_size}")
-
-    q = q.view(batch_size, -1, seq_size, hidden_size)  # (batch_size, head_size, seq_size, hidden_size)
-    k = k.view(batch_size, -1, seq_size, hidden_size)  # (batch_size, head_size, seq_size, hidden_size)
-    v = v.view(batch_size, -1, seq_size, hidden_size)  # (batch_size, head_size, seq_size, hidden_size)
-
-    head_size = q.shape[1]
-    
-    # print('kq_before', q[0,0,:10,0], k[0,0,:10,0])
-
-    k = _unfold(k, window_size, math.nan)  # (batch_size, head_size, seq_size, window_size, hidden_size)
-
-    q = q.view(batch_size, head_size, seq_size, 1, hidden_size)
-    # print('kq', q[0,0,:10,0,0], k[0,0,:10,0,0])
-
-    b = (q @ k.transpose(-1, -2)).squeeze(3) / math.sqrt(hidden_size)
-
-    
-    # print('b', b[0,0,:,0])
-
-    b = _sk(b, -9e15)  # (batch_size, head_size, seq_size, seq_size)
-
-    b = b.nan_to_num()
-
-
-    b = _mask2(b, padding_mask, -9e15)  # (batch_size, head_size, seq_size, seq_size)
-
-    a = torch.softmax(b, dim=-1)  # (batch_size, head_size, seq_size, seq_size)
-
-    values = a @ v  # (batch_size, head_size, seq_size, hidden_size)
-
-    a = a.view(*v_shape[:-2], seq_size, seq_size)
-    values = values.view(*v_shape[:-2], seq_size, hidden_size)
-    # print("attn2", a[0][0][:,:9])
-
-    return values, a
 
 def _skew(x, direction, padding_value):
     '''Convert diagonals into columns (or columns into diagonals depending on `direction`'''
@@ -201,6 +76,7 @@ def _skew(x, direction, padding_value):
 
 
 def get_main_diagonals_indices(b, n, w):
+    ''' Indices of w main diaognals'''
     diag_indices = torch.arange(-w,w+1)
     row_indices = torch.arange(0,n*n, n+1)
     col_indices = row_indices.view(1,-1,1) + diag_indices
@@ -208,48 +84,19 @@ def get_main_diagonals_indices(b, n, w):
     return col_indices.flatten(1)[:, w:-w]
 
 def populate_diags(x):
+    ''' Populate diagonals from columns'''
     bzs, seq_len, w_ = x.size()
     w = (w_ - 1)//2
     x= x.flatten(1)[:, w:-w].float()
-    res = torch.ones(bzs,seq_len,seq_len).flatten(1)*(-math.inf)
-    idx = get_main_diagonals_indices(bzs,seq_len,w)
+    res = torch.zeros(bzs,seq_len,seq_len, device=x.device).flatten(1)
+    idx = get_main_diagonals_indices(bzs,seq_len,w).to(x.device)
     res= res.scatter_(1, idx, x).view(bzs,seq_len,seq_len)
     return res
 
 
-def sliding_chunks_matmul_pv(prob: torch.Tensor, v: torch.Tensor, w: int):
-    '''Same as sliding_chunks_matmul_qk but for prob and value tensors. It is expecting the same output
-    format from sliding_chunks_matmul_qk'''
-    bsz, seqlen, num_heads, head_dim = v.size()
-    # print("in pv: bsz,seq_len,heads,dim - ",  bsz, seqlen, num_heads, head_dim)
-    assert seqlen % (w * 2) == 0
-    assert prob.size()[:3] == v.size()[:3]
-    assert prob.size(3) == 2 * w + 1
-    chunks_count = seqlen // w - 1
-    # group bsz and num_heads dimensions into one, then chunk seqlen into chunks of size 2w
-    chunk_prob = prob.transpose(1, 2).reshape(bsz * num_heads, seqlen // w, w, 2 * w + 1)
-
-    # group bsz and num_heads dimensions into one
-    v = v.transpose(1, 2).reshape(bsz * num_heads, seqlen, head_dim)
-
-    # pad seqlen with w at the beginning of the sequence and another w at the end
-    padded_v = F.pad(v, (0, 0, w, w), value=-1)
-
-    # chunk padded_v into chunks of size 3w and an overlap of size w
-    chunk_v_size = (bsz * num_heads, chunks_count + 1, 3 * w, head_dim)
-    chunk_v_stride = padded_v.stride()
-    chunk_v_stride = chunk_v_stride[0], w * chunk_v_stride[1], chunk_v_stride[1], chunk_v_stride[2]
-    chunk_v = padded_v.as_strided(size=chunk_v_size, stride=chunk_v_stride)
-
-    skewed_prob = _skew2(chunk_prob, padding_value=0)
-
-    context = torch.einsum('bcwd,bcdh->bcwh', (skewed_prob, chunk_v))
-    return context.view(bsz, num_heads, seqlen, head_dim).transpose(1, 2)
-
 def sliding_chunks_matmul_qk(q: torch.Tensor, k: torch.Tensor, w: int, padding_value: float):
     '''Matrix multiplicatio of query x key tensors using with a sliding window attention pattern.
-    This implementation splits the input into overlapping chunks of size 2w (e.g. 512 for pretrained Longformer)
-    with an overlap of size w'''
+    '''
     bsz, num_heads, seqlen, head_dim = q.size()
     # print("shapes ", bsz, seqlen, num_heads, head_dim)
     # assert seqlen % (w * 2) == 0
@@ -278,7 +125,7 @@ def sliding_chunks_matmul_qk(q: torch.Tensor, k: torch.Tensor, w: int, padding_v
     # has (w * 2 + 1) columns. The first (w) columns are the w lower triangles (attention from a word to
     # w previous words). The following column is attention score from each word to itself, then
     # followed by w columns for the upper triangle.
-    diagonal_attn = torch.ones((bsz * num_heads, chunks_count + 1, w, w * 2 + 1))*(-9e15)
+    diagonal_attn = torch.ones((bsz * num_heads, chunks_count + 1, w, w * 2 + 1), device=chunk_attn.device)*(-9e15)
 
     # copy parts from diagonal_chunk_attn into the compined matrix of attentions
     # - copying the main diagonal and the upper triangle
@@ -291,51 +138,14 @@ def sliding_chunks_matmul_qk(q: torch.Tensor, k: torch.Tensor, w: int, padding_v
     # separate bsz and num_heads dimensions again
     diagonal_attn = diagonal_attn.view(bsz, num_heads, seqlen, 2 * w + 1).transpose(2, 1)
     
-    mask_invalid_locations(diagonal_attn, w, 1, False)
+    mask_invalid_locations(diagonal_attn, w)
     diagonal_attn = diagonal_attn.transpose(1,2).view(bsz*num_heads, seqlen, 2 * w + 1)
     
     return diagonal_attn
 
-def _pad_mask(x, padding_mask, padding_value):
-    batch_size, num_heads, seq_len, seq_len = x.shape
-    mask = padding_mask.unsqueeze(-1) @ padding_mask.unsqueeze(-2)
-    mask = mask.view(batch_size, 1, seq_len, seq_len).expand_as(x)
-    return x.masked_fill(mask == 0, padding_value)
-    
-# def _pad_mask(padding_mask, num_heads, w, padding_value):
-#     # print("heads", num_heads)
-#     batch_size, seq_len= padding_mask.size()
-#     padding_mask = torch.logical_not(padding_mask)
-        
-#     padding_mask = padding_mask.unsqueeze(dim=1).unsqueeze(dim=-1)
-#     # cast to float/half then replace 1's with -inf
-#     float_mask = padding_mask.masked_fill(padding_mask, 1)
-#     float_mask = float_mask.repeat(num_heads, 1, 1, 1)
-#     ones = float_mask.new_ones(size=float_mask.size()) 
-#     d_mask = sliding_chunks_matmul_qk(ones, float_mask, w, padding_value=1)
-#     diag_mask = d_mask.reshape(batch_size*num_heads, seq_len, 2 * w + 1)
-#     diag_mask = torch.where(diag_mask==0, 0.0, padding_value)
-#     print(diag_mask[0])
-#     return diag_mask.reshape(batch_size, num_heads, seq_len, 2 * w + 1) 
 
-# def pad_to_window_size(input_ids: torch.Tensor, one_sided_window_size: int, pad_token_id: int):
-#     '''A helper function to pad tokens and mask to work with the sliding_chunks implementation of Longformer selfattention.
-#     Input:
-#         input_ids = torch.Tensor(bsz x seqlen): ids of wordpieces
-#         attention_mask = torch.Tensor(bsz x seqlen): attention mask
-#         one_sided_window_size = int: window size on one side of each token
-#         pad_token_id = int: tokenizer.pad_token_id
-#     Returns
-#         (input_ids, attention_mask) padded to length divisible by 2 * one_sided_window_size
-#     '''
-#     w = int(2 * one_sided_window_size)
-#     seqlen = input_ids.size(-1)
-#     padding_len = (w - seqlen % w) % w
-#     input_ids = F.pad(input_ids, (0, padding_len), value=pad_token_id)
-#     return input_ids
-
-
-def pad_qk_to_window_size(q,k,one_sided_window_size, paddin_value=0):
+def pad_qk_to_window_size(q,k,one_sided_window_size, padding_mask, paddin_value=0):
+    ''' Pad q,k and padding mask to fit window size'''
     seq_len = q.shape[-2]
     w = int(2 * one_sided_window_size)
     padding_len = (w - seq_len % w) % w
@@ -343,9 +153,9 @@ def pad_qk_to_window_size(q,k,one_sided_window_size, paddin_value=0):
     q = F.pad(q, (0,0,padding_l, padding_r), value=paddin_value)
     k = F.pad(k, (0,0,padding_l, padding_r), value=paddin_value)
     # v = F.pad(v, (0,0,padding_l, padding_r), value=paddin_value)
-    # if padding_mask is not None:
-    #     padding_mask = F.pad(padding_mask, (padding_l, padding_r), value=0)
-    return q,k
+    if padding_mask is not None:
+        padding_mask = F.pad(padding_mask, (padding_l, padding_r), value=0)
+    return q,k,padding_mask
 
 
 
@@ -387,27 +197,26 @@ def sliding_window_attention(q, k, v, window_size, padding_mask=None):
         no_head = True
         q,k,v = q.unsqueeze(1), k.unsqueeze(1), v.unsqueeze(1)
     num_heads = q.shape[1]
-    q,k= pad_qk_to_window_size(q,k,w)
-    # print("qkv", q.shape, k.shape, v.shape, padding_mask.shape)
+    q,k, padding_mask= pad_qk_to_window_size(q,k,w, padding_mask)
     new_seq_len = q.shape[-2]
-    scores = sliding_chunks_matmul_qk(q,k,w,padding_value=-9e15)
-    scores = populate_diags(scores).view(batch_size, num_heads, new_seq_len, new_seq_len)
+    scores = sliding_chunks_matmul_qk(q,k,w,padding_value=-9e15).view(batch_size, num_heads, new_seq_len, 2 * w + 1) #[batch_size,num_heads,seq_len, 2w+1]
+
+    if padding_mask is not None:
+        padding_mask = torch.logical_not(padding_mask.unsqueeze(dim=1).unsqueeze(dim=-1))
+        padding_mask = padding_mask.type_as(q).masked_fill(padding_mask, -9e15)
+        ones = padding_mask.new_ones(size=padding_mask.size())  # tensor of ones
+        d_mask = sliding_chunks_matmul_qk(ones, padding_mask, w, padding_value=-9e15).view(batch_size, 1, new_seq_len, 2 * w + 1)
+        scores += d_mask
+    attention =  torch.nn.functional.softmax(scores/math.sqrt(embed_dim), dim=-1).view(batch_size*num_heads, new_seq_len, 2 * w + 1) 
+    attention = populate_diags(attention).view(batch_size, num_heads, new_seq_len, new_seq_len) # [batch_size, num_heads, seq_len, seq_len]
     if new_seq_len != seq_len:
         pad = new_seq_len - seq_len
         padding_l, padding_r = (pad//2, pad//2) if pad > 1 else (0, 1)
-        scores = scores[:,:,padding_l:-padding_r,padding_l:-padding_r]
-
-    if padding_mask is not None:
-        scores = _pad_mask(scores, padding_mask, padding_value=-9e15)
-        # scores = _mask(scores.view(batch_size, num_heads, seq_len,-1), padding_mask, -1e15)
-    attention =  torch.nn.functional.softmax(scores/math.sqrt(embed_dim), dim=-1)
+        attention = attention[:,:,padding_l:-padding_r,padding_l:-padding_r]
     values = torch.matmul(attention, v)
-
     if no_head:
         values = values.squeeze(1)
-        attention = attention.squeeze(1)
-
-        
+        attention = attention.squeeze(1)        
     # print('vals', values[0])
     return values, attention
 

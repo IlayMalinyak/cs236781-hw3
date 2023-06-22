@@ -67,6 +67,7 @@ class Trainer(abc.ABC):
         best_acc = None
         epochs_without_improvement = 0
 
+
         checkpoint_filename = None
         if checkpoints is not None:
             checkpoint_filename = f"{checkpoints}.pt"

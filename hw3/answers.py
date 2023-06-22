@@ -105,7 +105,9 @@ well behaved and Controllable latent space: as mentioned above, the KL term indu
 """
 
 part2_q3 = r"""
-**Your answer:**
+The evidence distribution refers to the distribution of the input data given the latent space representation. It represents the likelihood of generating the input data from a sample in the latent space. Maximizing the evidence distribution ensures that the reconstructed data resembles the original data as closely as possible. By maximizing the evidence distribution, we encourage the decoder to generate reconstructions that capture the important features and characteristics of the input data. This promotes the learning of meaningful representations in the latent space and improves the overall quality of the generated samples.
+<br> 
+as explained in the lecture, the evidence distribution itself is intractable but we can get a lower bound on it
 
 
 
@@ -132,13 +134,13 @@ PART3_CUSTOM_DATA_URL = None
 
 def part3_transformer_encoder_hyperparams():
     hypers = dict(
-        embed_dim = 64, 
+        embed_dim = 128, 
         num_heads = 4,
-        num_layers = 4,
-        hidden_dim = 128,
-        window_size = 32,
-        droupout = 0.1,
-        lr=5e-5,
+        num_layers = 2,
+        hidden_dim = 192,
+        window_size = 128,
+        droupout = 0.22,
+        lr=0.000549,
     )
 
     # TODO: Tweak the hyperparameters to train the transformer encoder.
@@ -151,25 +153,25 @@ def part3_transformer_encoder_hyperparams():
 
 
 part3_q1 = r"""
-**Your answer:**
+when stacking multiple layers in a CNN architecture, each layer gets an input which was proccessed using a recpetive field defined by the previous layer's kernel and proccess it using the current layer's receptive field. thus, each layer increase the effective total receptive field of the input with respect to the final layer. In a sliding window there is a similiar effect - each layer processes the input sequence with a sliding window mechanism using an attention mechanism that attends to a fixed-sized window of neighboring positions and capture the dependencies and interactions within that window. By stacking multiple layers, each layer receives input from a larger context captured by the previous layer and increase the effective total context window at the final layer.  
 
 """
 
 part3_q2 = r"""
-**Your answer:**
+one possible option that was suggested in the paper is the following - combining global attention for a small number of tokens together with sliding window. The tokens that uses the golbal attention attend to all other tokens and all other tokens asttend to them so they can proccess the globl information, while the tokens that uses sliding window attention proccess local context. we can spread the global attention tokens evenly accross the sentence. in a classification task it is recommended that the classification token (CLS in our case) would use global attenion. 
 
 
 """
 
 
 part4_q1 = r"""
-**Your answer:**
+comparing to part3, fine tuning outperfomrs training from scratch. this fact comes from several reasons - the model we fine tuned is much larger than the model we built from scratch so it has more expressivness. in addition, it was trained on a much larger datasets in the pretrained phase. in addition, the tasks that the pretrained model was trained on in the pretraining phase are similiar to the downstream task. this makes the context that was learned in the  pretraining phase "relevant" for the downstream task and leads to better results (using only training of the classifiers) than training from scratch. when using a pretrained model from the same domain and on tasks that are aimiliar to the pretrianing, it is usually the case that fine tuning would give better results than trianing from scratch (we saw it also in vision models, that contrastive learning outperfomrs training from scratch). if the task is very specific and different in nature, or if the domain is different (for example, using BERT for non NLP time series classification) we might encounter different results and find that training from scratch is better.  
 
 
 """
 
 part4_q2 = r"""
-while it is possible to fine tune the model using some of the internal layers, we suspect that the results would be worse compare to fine tune the last layers. generally, and similiar to CNNs, as we go deeper in the architecture (closer to the output) the learned representations are more complex and task specific. this implies that the middle layers(multihead attention bocks) capture a more general dependencies and relationships between words or tokens in the input sequence that can apply to many different tasks, while the last layers (classification head) adapts the general represantations to the specific task at hand. this analogy suggest that when we fine tune an NLP task (like sentiment analysis) we can use the general represantations as is and just fine tune the last layers. doing the opposite would not give much benefit since there's not much training needed for the middle layers (assuming that the model was pretrained on the same domain) and the classification head would not be updated. this ofcourse can change if we fine tune for a task from a different domain (general time series for example) where the middle layers dose not necesseraly represent the dependencies of our dataset. 
+while it is possible to fine tune the model using some of the internal layers, we suspect that the model would be able to learn but the results would be worse compare to fine tuning the last layers. generally, and similiar to CNNs, as we go deeper in the architecture (closer to the output) the learned representations are more complex and task specific. this implies that the middle layers(multihead attention bocks) capture a more general dependencies and relationships between words or tokens in the input sequence that can apply to many different tasks, while the last layers (classification head) adapts the general represantations to the specific task at hand. this analogy suggest that when we fine tune an NLP task (like sentiment analysis) we can use the general represantations as is and just fine tune the last layers. doing the opposite can lead to improvement (by improving the general represantations and adapt them to the specific task) but would not give much benefit since there's not much training needed for the middle layers (assuming that the model was pretrained on the same domain) and the classification head would not be updated. this ofcourse can change if we fine tune for a task from a different domain (general time series for example) where the middle layers dose not necesseraly represent the dependencies of our dataset. 
 
 
 """
