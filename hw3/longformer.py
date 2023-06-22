@@ -94,6 +94,7 @@ def sliding_chunks_matmul_qk(q: torch.Tensor, k: torch.Tensor, w: int, padding_v
     This implementation splits the input into overlapping chunks of size 2w (e.g. 512 for pretrained Longformer)
     with an overlap of size w'''
     bsz, seqlen, num_heads, head_dim = q.size()
+    print("seqlen", seqlen)
     assert seqlen % (w * 2) == 0
     assert q.size() == k.size()
 
@@ -114,6 +115,8 @@ def sliding_chunks_matmul_qk(q: torch.Tensor, k: torch.Tensor, w: int, padding_v
 
     # convert diagonals into columns
     diagonal_chunk_attn = _skew(chunk_attn, direction=(0, 0, 0, 1), padding_value=padding_value)
+    # print("long q", q[0])
+    # print("long chunk: ", chunk_q[0])
 
     # allocate space for the overall attention matrix where the chunks are compined. The last dimension
     # has (w * 2 + 1) columns. The first (w) columns are the w lower triangles (attention from a word to
@@ -133,7 +136,7 @@ def sliding_chunks_matmul_qk(q: torch.Tensor, k: torch.Tensor, w: int, padding_v
     # separate bsz and num_heads dimensions again
     diagonal_attn = diagonal_attn.view(bsz, num_heads, seqlen, 2 * w + 1).transpose(2, 1)
 
-    print("long_diag:", diagonal_attn[0])
+    # print("long_diag:", diagonal_attn[0])
 
     mask_invalid_locations(diagonal_attn, w, 1, False)
     return diagonal_attn
@@ -276,7 +279,7 @@ class LongformerConfig(RobertaConfig):
 
 class LongformerSelfAttention(nn.Module):
     def __init__(self, config, layer_id):
-        super(LongformerSelfAttention, self).__init__()
+        super().__init__()
         if config.hidden_size % config.num_attention_heads != 0:
             raise ValueError(
                 "The hidden size (%d) is not a multiple of the number of attention "
@@ -362,6 +365,9 @@ class LongformerSelfAttention(nn.Module):
         v = self.value(hidden_states)
         q /= math.sqrt(self.head_dim)
 
+        print("q", q[0])
+        print('k', k[0])
+
         q = q.view(seq_len, bsz, self.num_heads, self.head_dim).transpose(0, 1)
         k = k.view(seq_len, bsz, self.num_heads, self.head_dim).transpose(0, 1)
         # attn_weights = (bsz, seq_len, num_heads, window*2+1)
@@ -382,7 +388,7 @@ class LongformerSelfAttention(nn.Module):
             # from (bsz x seq_len) to (bsz x seq_len x num_heads x hidden_size)
             remove_from_windowed_attention_mask = remove_from_windowed_attention_mask.unsqueeze(dim=-1).unsqueeze(dim=-1)
             # cast to float/half then replace 1's with -inf
-            float_mask = remove_from_windowed_attention_mask.type_as(q).masked_fill(remove_from_windowed_attention_mask, -10000.0)
+            float_mask = remove_from_windowed_attention_mask.type_as(q).masked_fill(remove_from_windowed_attention_mask, -9e15)
             repeat_size = 1 if isinstance(self.attention_dilation, int) else len(self.attention_dilation)
             float_mask = float_mask.repeat(1, 1, repeat_size, 1)
             ones = float_mask.new_ones(size=float_mask.size())  # tensor of ones
@@ -391,10 +397,10 @@ class LongformerSelfAttention(nn.Module):
                 pass
                 # d_mask = diagonaled_mm_tvm(ones, float_mask, self.attention_window, self.attention_dilation, False, 0, False)
             elif self.attention_mode == "sliding_chunks":
-                d_mask = sliding_chunks_matmul_qk(ones, float_mask, self.attention_window, padding_value=0)
+                d_mask = sliding_chunks_matmul_qk(ones, float_mask, self.attention_window, padding_value=-9e15)
             elif self.attention_mode == "sliding_chunks_no_overlap":
                 d_mask = sliding_chunks_no_overlap_matmul_qk(ones, float_mask, self.attention_window, padding_value=0)
-
+            # print("long mask", d_mask[0])
             attn_weights += d_mask
         assert list(attn_weights.size())[:3] == [bsz, seq_len, self.num_heads]
         assert attn_weights.size(dim=3) in [self.attention_window * 2 + 1, self.attention_window * 3]
@@ -405,7 +411,7 @@ class LongformerSelfAttention(nn.Module):
             selected_k[selection_padding_mask_nonzeros] = k[extra_attention_mask_nonzeros]
             # (bsz, seq_len, num_heads, max_num_extra_indices_per_batch)
             selected_attn_weights = torch.einsum('blhd,bshd->blhs', (q, selected_k))
-            selected_attn_weights[selection_padding_mask_zeros[0], :, :, selection_padding_mask_zeros[1]] = -10000
+            selected_attn_weights[selection_padding_mask_zeros[0], :, :, selection_padding_mask_zeros[1]] = -9e15
             # concat to attn_weights
             # (bsz, seq_len, num_heads, extra attention count + 2*window+1)
             attn_weights = torch.cat((selected_attn_weights, attn_weights), dim=-1)

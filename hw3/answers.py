@@ -132,13 +132,13 @@ PART3_CUSTOM_DATA_URL = None
 
 def part3_transformer_encoder_hyperparams():
     hypers = dict(
-        embed_dim = 0, 
-        num_heads = 0,
-        num_layers = 0,
-        hidden_dim = 0,
-        window_size = 0,
-        droupout = 0.0,
-        lr=0.0,
+        embed_dim = 64, 
+        num_heads = 4,
+        num_layers = 4,
+        hidden_dim = 128,
+        window_size = 32,
+        droupout = 0.1,
+        lr=5e-5,
     )
 
     # TODO: Tweak the hyperparameters to train the transformer encoder.
@@ -169,7 +169,7 @@ part4_q1 = r"""
 """
 
 part4_q2 = r"""
-**Your answer:**
+while it is possible to fine tune the model using some of the internal layers, we suspect that the results would be worse compare to fine tune the last layers. generally, and similiar to CNNs, as we go deeper in the architecture (closer to the output) the learned representations are more complex and task specific. this implies that the middle layers(multihead attention bocks) capture a more general dependencies and relationships between words or tokens in the input sequence that can apply to many different tasks, while the last layers (classification head) adapts the general represantations to the specific task at hand. this analogy suggest that when we fine tune an NLP task (like sentiment analysis) we can use the general represantations as is and just fine tune the last layers. doing the opposite would not give much benefit since there's not much training needed for the middle layers (assuming that the model was pretrained on the same domain) and the classification head would not be updated. this ofcourse can change if we fine tune for a task from a different domain (general time series for example) where the middle layers dose not necesseraly represent the dependencies of our dataset. 
 
 
 """

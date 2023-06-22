@@ -344,7 +344,16 @@ class TransformerEncoderTrainer(Trainer):
         # TODO:
         #  fill out the training loop.
         # ====== YOUR CODE: ======
-        raise NotImplementedError()
+        self.optimizer.zero_grad()
+        logits = self.model(input_ids, attention_mask)
+        # g = [p.grad for p in model.parameters()]
+        # print(g[0].shape)
+        loss = self.loss_fn(logits, label)
+        loss.backward()
+        self.optimizer.step()
+        preds = torch.round(torch.sigmoid(logits))
+        # print("outs: ", preds, label)
+        num_correct = (preds == label).sum()
         # ========================
         
         
@@ -363,7 +372,10 @@ class TransformerEncoderTrainer(Trainer):
             # TODO:
             #  fill out the testing loop.
             # ====== YOUR CODE: ======
-            raise NotImplementedError()
+            logits = self.model(input_ids, attention_mask)
+            loss = self.loss_fn(logits, label)
+            preds = torch.round(torch.sigmoid(logits))
+            num_correct = (preds == label).sum()
             # ========================
 
             
@@ -383,11 +395,20 @@ class FineTuningTrainer(Trainer):
         #  fill out the training loop.
         # ====== YOUR CODE: ======
 
-        raise NotImplementedError()
+        self.optimizer.zero_grad()
+        out = self.model(input_ids=input_ids, attention_mask=attention_masks, labels=labels)        
+        loss, logits = out[0], out[1]
+        loss.backward()
+        self.optimizer.step()
+        preds = torch.argmax(torch.sigmoid(logits),dim=1)
+        # print("outs: ", preds, labels)
+        num_correct = (preds == labels).sum().detach()
+        
+
         
         # ========================
         
-        return BatchResult(loss, num_correct)
+        return BatchResult(loss.item(), num_correct.item())
         
     def test_batch(self, batch) -> BatchResult:
         
@@ -399,6 +420,9 @@ class FineTuningTrainer(Trainer):
             # TODO:
             #  fill out the training loop.
             # ====== YOUR CODE: ======
-            raise NotImplementedError()
+            out = self.model(input_ids=input_ids, attention_mask=attention_masks, labels=labels)
+            loss, logits = out[0], out[1]
+            preds = torch.argmax(torch.sigmoid(logits),dim=1)
+            num_correct = (preds == labels).sum().detach()
             # ========================
-        return BatchResult(loss, num_correct)
+        return BatchResult(loss.item(), num_correct.item())
