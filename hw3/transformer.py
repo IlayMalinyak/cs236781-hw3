@@ -13,35 +13,6 @@ from .longformer import LongformerSelfAttention, LongformerConfig
 #     mask = mask.view(batch_size, 1, seq_len, seq_len).expand_as(x).to(x.device)
 #     return x.masked_fill(mask == 0, padding_value)
 
-# def sliding_chunks_matmul_pv(prob: torch.Tensor, v: torch.Tensor, w: int):
-#     '''Same as sliding_chunks_matmul_qk but for prob and value tensors. It is expecting the same output
-#     format from sliding_chunks_matmul_qk'''
-#     bsz, seqlen, num_heads, head_dim = v.size()
-#     # print("in pv: bsz,seq_len,heads,dim - ",  bsz, seqlen, num_heads, head_dim)
-#     assert seqlen % (w * 2) == 0
-#     assert prob.size()[:3] == v.size()[:3]
-#     assert prob.size(3) == 2 * w + 1
-#     chunks_count = seqlen // w - 1
-#     # group bsz and num_heads dimensions into one, then chunk seqlen into chunks of size 2w
-#     chunk_prob = prob.transpose(1, 2).reshape(bsz * num_heads, seqlen // w, w, 2 * w + 1)
-
-#     # group bsz and num_heads dimensions into one
-#     v = v.transpose(1, 2).reshape(bsz * num_heads, seqlen, head_dim)
-
-#     # pad seqlen with w at the beginning of the sequence and another w at the end
-#     padded_v = F.pad(v, (0, 0, w, w), value=-1)
-
-#     # chunk padded_v into chunks of size 3w and an overlap of size w
-#     chunk_v_size = (bsz * num_heads, chunks_count + 1, 3 * w, head_dim)
-#     chunk_v_stride = padded_v.stride()
-#     chunk_v_stride = chunk_v_stride[0], w * chunk_v_stride[1], chunk_v_stride[1], chunk_v_stride[2]
-#     chunk_v = padded_v.as_strided(size=chunk_v_size, stride=chunk_v_stride)
-
-#     skewed_prob = _skew2(chunk_prob, padding_value=0)
-
-#     context = torch.einsum('bcwd,bcdh->bcwh', (skewed_prob, chunk_v))
-#     return context.view(bsz, num_heads, seqlen, head_dim).transpose(1, 2)
-    
 
 def _get_invalid_locations_mask(w, device):
     ''' Get values outside the window'''
@@ -143,8 +114,49 @@ def sliding_chunks_matmul_qk(q: torch.Tensor, k: torch.Tensor, w: int, padding_v
     
     return diagonal_attn
 
+def _skew2(x, padding_value):
+    '''shift every row 1 step to right converting columns into diagonals'''
+    # X = B x C x M x L
+    B, C, M, L = x.size()
+    x = F.pad(x, (0, M + 1), value=padding_value)  # B x C x M x (L+M+1)
+    x = x.view(B, C, -1)  # B x C x ML+MM+M
+    x = x[:, :, :-M]  # B x C x ML+MM
+    x = x.view(B, C, M, M + L)  # B x C, M x L+M
+    x = x[:, :, :, :-1]
+    return x
 
-def pad_qk_to_window_size(q,k,one_sided_window_size, padding_mask, paddin_value=0):
+def sliding_chunks_matmul_pv(prob: torch.Tensor, v: torch.Tensor, w: int):
+    '''Same as sliding_chunks_matmul_qk but for prob and value tensors. It is expecting the same output
+    format from sliding_chunks_matmul_qk'''
+    bsz, seqlen, num_heads, head_dim = v.size()
+    print("in pv: bsz,seq_len,heads,dim - ",  bsz, seqlen, num_heads, head_dim)
+    assert seqlen % (w * 2) == 0
+    assert prob.size()[:3] == v.size()[:3]
+    assert prob.size(3) == 2 * w + 1
+    chunks_count = seqlen // w - 1
+    # group bsz and num_heads dimensions into one, then chunk seqlen into chunks of size 2w
+    chunk_prob = prob.transpose(1,2).reshape(bsz * num_heads, seqlen // w, w, 2 * w + 1)
+
+    # group bsz and num_heads dimensions into one
+    v = v.transpose(1, 2).reshape(bsz * num_heads, seqlen, head_dim)
+
+    # pad seqlen with w at the beginning of the sequence and another w at the end
+    padded_v = F.pad(v, (0, 0, w, w), value=-1)
+
+    # chunk padded_v into chunks of size 3w and an overlap of size w
+    chunk_v_size = (bsz * num_heads, chunks_count + 1, 3 * w, head_dim)
+    chunk_v_stride = padded_v.stride()
+    chunk_v_stride = chunk_v_stride[0], w * chunk_v_stride[1], chunk_v_stride[1], chunk_v_stride[2]
+    chunk_v = padded_v.as_strided(size=chunk_v_size, stride=chunk_v_stride)
+
+    skewed_prob = _skew2(chunk_prob, padding_value=0)
+
+    context = torch.einsum('bcwd,bcdh->bcwh', (skewed_prob, chunk_v))
+    return context.view(bsz, num_heads, seqlen, head_dim)
+    
+
+
+def pad_qkv_to_window_size(q,k,v,one_sided_window_size, padding_mask, paddin_value=0):
     ''' Pad q,k and padding mask to fit window size'''
     seq_len = q.shape[-2]
     w = int(2 * one_sided_window_size)
@@ -152,10 +164,12 @@ def pad_qk_to_window_size(q,k,one_sided_window_size, padding_mask, paddin_value=
     padding_l, padding_r = (padding_len//2, padding_len//2) if w > 2 else (0, 1)
     q = F.pad(q, (0,0,padding_l, padding_r), value=paddin_value)
     k = F.pad(k, (0,0,padding_l, padding_r), value=paddin_value)
+    v = F.pad(v, (0,0,padding_l, padding_r), value=paddin_value)
+
     # v = F.pad(v, (0,0,padding_l, padding_r), value=paddin_value)
     if padding_mask is not None:
         padding_mask = F.pad(padding_mask, (padding_l, padding_r), value=0)
-    return q,k,padding_mask
+    return q,k,v,padding_mask
 
 
 
@@ -197,7 +211,8 @@ def sliding_window_attention(q, k, v, window_size, padding_mask=None):
         no_head = True
         q,k,v = q.unsqueeze(1), k.unsqueeze(1), v.unsqueeze(1)
     num_heads = q.shape[1]
-    q,k, padding_mask= pad_qk_to_window_size(q,k,w, padding_mask)
+    q,k,v, padding_mask= pad_qkv_to_window_size(q,k,v,w, padding_mask)
+    v = v.transpose(1,2)
     new_seq_len = q.shape[-2]
     scores = sliding_chunks_matmul_qk(q,k,w,padding_value=-9e15).view(batch_size, num_heads, new_seq_len, 2 * w + 1) #[batch_size,num_heads,seq_len, 2w+1]
 
@@ -205,52 +220,21 @@ def sliding_window_attention(q, k, v, window_size, padding_mask=None):
         padding_mask = torch.logical_not(padding_mask.unsqueeze(dim=1).unsqueeze(dim=-1))
         padding_mask = padding_mask.type_as(q).masked_fill(padding_mask, -9e15)
         ones = padding_mask.new_ones(size=padding_mask.size())  # tensor of ones
-        d_mask = sliding_chunks_matmul_qk(ones, padding_mask, w, padding_value=-9e15).view(batch_size, 1, new_seq_len, 2 * w + 1)
-        scores += d_mask
-    attention =  torch.nn.functional.softmax(scores/math.sqrt(embed_dim), dim=-1).view(batch_size*num_heads, new_seq_len, 2 * w + 1) 
+        d_mask = sliding_chunks_matmul_qk(ones, padding_mask, w, padding_value=-9e15).view(batch_size, 1, new_seq_len, 2 * w + 1)  
+        scores += d_mask #[batch_size,num_heads,seq_len, 2w+1]
+    attention =  torch.nn.functional.softmax(scores/math.sqrt(embed_dim), dim=-1).transpose(1,2)
+    values = sliding_chunks_matmul_pv(attention, v, w) #[batch_size,num_heads,seq_len, embed_dim]
+    attention = attention.transpose(2,1).view(batch_size*num_heads, new_seq_len, 2 * w + 1)
     attention = populate_diags(attention).view(batch_size, num_heads, new_seq_len, new_seq_len) # [batch_size, num_heads, seq_len, seq_len]
     if new_seq_len != seq_len:
         pad = new_seq_len - seq_len
         padding_l, padding_r = (pad//2, pad//2) if pad > 1 else (0, 1)
         attention = attention[:,:,padding_l:-padding_r,padding_l:-padding_r]
-    values = torch.matmul(attention, v)
+        values = values[:,:,padding_l:-padding_r,:]
     if no_head:
         values = values.squeeze(1)
         attention = attention.squeeze(1)        
-    # print('vals', values[0])
     return values, attention
-
-
-def attention_vanilla(q, k, v, window_size, padding_mask=None):
-    print("vanilla!", padding_mask)
-    
-
-
-    # Compute the attention scores
-    scores = torch.matmul(q, k.transpose(-2, -1)) / torch.sqrt(torch.tensor(q.size(-1), dtype=torch.float32))
-    n = scores.shape[-2]
-    for i in range(3,n):
-        scores[:,:, torch.arange(n-i), torch.arange(i,n)] = -9e15
-        scores[:,:, torch.arange(i,n), torch.arange(n-i)] = -9e15
-    
-    # Apply padding mask if provided
-    if padding_mask is not None:
-        print("masking")
-        scores = _pad_mask(scores, padding_mask, padding_value=-9e15)
-
-   
-        
-
-    
-    # Apply softmax to obtain attention weights
-    attention_weights = torch.softmax(scores, dim=-1)
-    # print("scores", scores[0][0])
-
-    # Compute the output values
-    values = torch.matmul(attention_weights, v)
-    print()
-    
-    return values, attention_weights
     
     
 
